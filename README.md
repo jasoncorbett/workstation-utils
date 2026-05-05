@@ -67,3 +67,7 @@ for f in <repo>/bin/*; do rm -f "$HOME/.local/bin/$(basename "$f")"; done
 (Or `~/bin/` if that's where install picked.) The `install` script has no
 dedicated uninstall mode on purpose — there are few enough symlinks that a
 one-liner is clearer than a flag.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
