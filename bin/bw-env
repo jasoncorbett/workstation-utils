@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Usage: bw-env <secret-name> <command> [args...]
+#
+# Reads the notes field of the given Bitwarden item (via rbw), parses it as
+# .env-style KEY=value lines, exports each into the environment, then execs
+# the supplied command.
+
+die() { printf 'bw-env: %s\n' "$*" >&2; exit 1; }
+
+[[ $# -ge 2 ]] || die "usage: bw-env <secret-name> <command> [args...]"
+
+name="$1"; shift
+
+command -v rbw >/dev/null 2>&1 || die "rbw not installed"
+
+notes=$(rbw get --field notes "$name" 2>/dev/null) \
+  || die "could not read notes for vault item '$name'"
+[[ -n "$notes" ]] || die "vault item '$name' has empty notes"
+
+while IFS= read -r line; do
+  line="${line%$'\r'}"
+  # ltrim
+  line="${line#"${line%%[![:space:]]*}"}"
+  # skip blanks and comments
+  [[ -z "$line" || "${line:0:1}" == "#" ]] && continue
+  # strip optional leading 'export '
+  [[ "$line" == export\ * ]] && line="${line#export }"
+  # require KEY=value
+  [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]] || continue
+  key="${BASH_REMATCH[1]}"
+  val="${BASH_REMATCH[2]}"
+  # strip matching surrounding single or double quotes
+  if (( ${#val} >= 2 )); then
+    first="${val:0:1}"; last="${val: -1}"
+    if [[ ( "$first" == '"' && "$last" == '"' ) || ( "$first" == "'" && "$last" == "'" ) ]]; then
+      val="${val:1:${#val}-2}"
+    fi
+  fi
+  export "$key=$val"
+done <<< "$notes"
+
+exec "$@"

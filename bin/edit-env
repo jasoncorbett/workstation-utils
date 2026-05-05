@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Edit the env-vars notes blob of a Bitwarden item named
+# `<project-name>-env-<env-name>` in the user's $EDITOR. The first-line
+# password slot used by rbw is hidden from the editing experience.
+#
+# Usage: edit-env [env-name]   (default env-name: "default")
+
+die() { printf 'edit-env: %s\n' "$*" >&2; exit 1; }
+
+command -v rbw >/dev/null 2>&1 || die "rbw not installed"
+
+env_name="${1:-default}"
+project_name=$(basename "$(pwd -P)")
+item="${project_name}-env-${env_name}"
+
+rbw get "$item" >/dev/null 2>&1 || die "vault item '$item' not found"
+
+current_notes=$(rbw get --field notes "$item" 2>/dev/null || true)
+existing_pw=$(rbw get "$item" 2>/dev/null || true)
+
+tmp=$(mktemp -t envedit.XXXXXX)
+shim=$(mktemp -t rbwshim.XXXXXX)
+content_file=$(mktemp -t rbwcontent.XXXXXX)
+trap 'rm -f "$tmp" "$shim" "$content_file"' EXIT
+
+printf '%s\n' "$current_notes" > "$tmp"
+
+editor="${VISUAL:-${EDITOR:-vi}}"
+$editor "$tmp"
+
+new_notes=$(cat "$tmp")
+
+if [[ "$new_notes" == "$current_notes" ]]; then
+  echo "edit-env: no changes"
+  exit 0
+fi
+
+cat > "$shim" <<'SHIM'
+#!/usr/bin/env bash
+cat "$RBW_UPLOAD_CONTENT" > "$1"
+SHIM
+chmod +x "$shim"
+
+{ printf '%s\n' "$existing_pw"; printf '%s\n' "$new_notes"; } > "$content_file"
+
+RBW_UPLOAD_CONTENT="$content_file" EDITOR="$shim" VISUAL="$shim" rbw edit "$item"
+echo "edit-env: saved $item"

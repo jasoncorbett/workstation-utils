@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Wrapper around `aws` that loads credentials from a Bitwarden item named
+# `aws-<profile>` (notes blob is treated as a .env file, see bw-env).
+
+die() { printf 'aws-bw: %s\n' "$*" >&2; exit 1; }
+
+# Locate the real aws by walking PATH and skipping anything that shares this
+# script's inode (so symlinks of this wrapper are also skipped cleanly).
+self_inode=$(stat -f %i "$0" 2>/dev/null || stat -c %i "$0" 2>/dev/null) \
+  || die "could not stat self"
+
+real_aws=""
+while IFS= read -r candidate; do
+  [[ -x "$candidate" ]] || continue
+  cand_inode=$(stat -f %i "$candidate" 2>/dev/null || stat -c %i "$candidate" 2>/dev/null) || continue
+  [[ "$cand_inode" != "$self_inode" ]] || continue
+  real_aws="$candidate"
+  break
+done < <(/usr/bin/which -a aws 2>/dev/null || true)
+
+[[ -n "$real_aws" ]] || die "real aws CLI not found in PATH"
+
+# Subcommands that don't need credentials — pass through untouched.
+case "${1:-}" in
+  ""|help|--help|--version|configure)
+    exec "$real_aws" "$@"
+    ;;
+esac
+
+# Pull --profile out of the args (both `--profile foo` and `--profile=foo`).
+profile=""
+new_args=()
+skip_next=0
+for arg in "$@"; do
+  if (( skip_next )); then profile="$arg"; skip_next=0; continue; fi
+  case "$arg" in
+    --profile)    skip_next=1 ;;
+    --profile=*)  profile="${arg#--profile=}" ;;
+    *)            new_args+=("$arg") ;;
+  esac
+done
+profile="${profile:-${AWS_PROFILE:-default}}"
+
+# Drop AWS_PROFILE so the env-var creds win cleanly over any profile config.
+unset AWS_PROFILE
+
+# bw-env lives next to this script.
+self_dir=$(cd "$(dirname "$(command -v "$0")")" && pwd -P)
+bw_env="$self_dir/bw-env"
+[[ -x "$bw_env" ]] || die "bw-env not found at $bw_env"
+
+exec "$bw_env" "aws-${profile}" "$real_aws" "${new_args[@]}"

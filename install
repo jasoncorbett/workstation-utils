@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Symlink everything in ./bin into the user's preferred local bin directory.
+# Idempotent: re-running fixes nothing if symlinks already point at this repo.
+
+die() { printf 'install: %s\n' "$*" >&2; exit 1; }
+
+self_dir=$(cd "$(dirname "$0")" && pwd -P)
+src_bin="$self_dir/bin"
+[[ -d "$src_bin" ]] || die "no bin/ directory at $src_bin"
+
+# Pick a target directory. Preference: an entry already in PATH, then ~/.local/bin
+# (XDG-ish modern default), then ~/bin.
+target=""
+IFS=':' read -ra path_parts <<< "$PATH"
+for candidate in "$HOME/bin" "$HOME/.local/bin"; do
+  for p in "${path_parts[@]}"; do
+    [[ "$p" == "$candidate" ]] || continue
+    target="$candidate"
+    break 2
+  done
+done
+
+if [[ -z "$target" ]]; then
+  target="$HOME/.local/bin"
+  printf 'install: neither ~/bin nor ~/.local/bin is in PATH; using %s\n' "$target"
+  printf 'install: add this line to your shell rc to pick it up:\n'
+  printf '  export PATH="%s:$PATH"\n' "$target"
+fi
+
+mkdir -p "$target"
+
+added=()
+unchanged=()
+skipped=()
+
+for src in "$src_bin"/*; do
+  [[ -f "$src" && -x "$src" ]] || continue
+  name=$(basename "$src")
+  link="$target/$name"
+
+  if [[ -e "$link" || -L "$link" ]]; then
+    # Force stat to follow symlinks (BSD stat doesn't by default; GNU stat does).
+    src_inode=$(stat -L -f %i "$src" 2>/dev/null || stat -L -c %i "$src")
+    link_inode=$(stat -L -f %i "$link" 2>/dev/null || stat -L -c %i "$link" 2>/dev/null || true)
+    if [[ -n "$link_inode" && "$link_inode" == "$src_inode" ]]; then
+      unchanged+=("$name")
+      continue
+    fi
+    if [[ -L "$link" ]]; then
+      printf 'install: %s is a symlink to a different target; skipping\n' "$link" >&2
+    else
+      printf 'install: %s exists and is not a symlink; skipping\n' "$link" >&2
+    fi
+    skipped+=("$name")
+    continue
+  fi
+
+  ln -s "$src" "$link"
+  added+=("$name")
+done
+
+print_list() {
+  local label="$1"; shift
+  (( $# > 0 )) || return 0
+  printf '%s (%d):\n' "$label" "$#"
+  printf '  %s\n' "$@"
+}
+
+print_list "linked" "${added[@]+"${added[@]}"}"
+print_list "already up to date" "${unchanged[@]+"${unchanged[@]}"}"
+print_list "skipped" "${skipped[@]+"${skipped[@]}"}"
+printf 'install: target = %s\n' "$target"

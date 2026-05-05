@@ -1,0 +1,121 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Upload .env files in the current directory to Bitwarden as items named
+# `<project-name>-env-<env-name>`. Notes blob holds the file contents.
+# Patterns picked up: .env, .env.<name>, .env-<name>. Skips .env.example /
+# .env-example. Files containing placeholder syntax are skipped (left on disk).
+# After successful upload, the local file is deleted.
+
+die() { printf 'upload-env: %s\n' "$*" >&2; exit 1; }
+
+command -v rbw >/dev/null 2>&1 || die "rbw not installed"
+
+project_name=$(basename "$(pwd -P)")
+
+shopt -s nullglob
+candidates=( .env .env.* .env-* )
+shopt -u nullglob
+
+files=()
+for f in "${candidates[@]}"; do
+  [[ -f "$f" ]] || continue
+  case "$f" in
+    .env.example|.env-example) continue ;;
+  esac
+  files+=("$f")
+done
+
+if [[ ${#files[@]} -eq 0 ]]; then
+  echo "upload-env: no .env files found in $(pwd -P)"
+  exit 0
+fi
+
+env_name_for() {
+  case "$1" in
+    .env)    printf 'default' ;;
+    .env.*)  printf '%s' "${1#.env.}" ;;
+    .env-*)  printf '%s' "${1#.env-}" ;;
+  esac
+}
+
+# Heuristic placeholder detection — anything that looks unfilled.
+has_placeholder() {
+  local file="$1"
+  # Angle-bracket placeholders like <your-key>, <API_KEY>
+  grep -qE '<[A-Za-z0-9_.+-]+>' "$file" && return 0
+  # Unresolved shell-style ${VAR}
+  grep -qE '\$\{[A-Za-z_][A-Za-z0-9_]*\}' "$file" && return 0
+  # Common placeholder words (case-insensitive), as standalone tokens
+  grep -qiE '(^|[^A-Za-z0-9_])(changeme|placeholder|todo|xxx|fixme|your[-_][a-z0-9_-]+[-_]here)([^A-Za-z0-9_]|$)' "$file" && return 0
+  return 1
+}
+
+# Editor shim that overwrites the file rbw passes us with our prepared content.
+shim=$(mktemp -t rbwshim.XXXXXX)
+content_file=$(mktemp -t rbwcontent.XXXXXX)
+trap 'rm -f "$shim" "$content_file"' EXIT
+cat > "$shim" <<'SHIM'
+#!/usr/bin/env bash
+cat "$RBW_UPLOAD_CONTENT" > "$1"
+SHIM
+chmod +x "$shim"
+
+prompt_choice() {
+  local item="$1" choice
+  while :; do
+    printf '%s already exists. [s]kip / [o]verwrite / [c]ancel? ' "$item" >/dev/tty
+    IFS= read -r choice </dev/tty || die "no tty for prompt"
+    case "${choice,,}" in
+      s|skip)      printf 'skip';      return ;;
+      o|overwrite) printf 'overwrite'; return ;;
+      c|cancel)    printf 'cancel';    return ;;
+      *) printf '  unknown choice: %s\n' "$choice" >/dev/tty ;;
+    esac
+  done
+}
+
+for f in "${files[@]}"; do
+  env_name=$(env_name_for "$f")
+  item="${project_name}-env-${env_name}"
+
+  if has_placeholder "$f"; then
+    printf 'skipping %s (placeholder syntax detected) -> would have been %s\n' "$f" "$item" >&2
+    continue
+  fi
+
+  action="add"
+  existing_pw=""
+  if rbw get "$item" >/dev/null 2>&1; then
+    action=$(prompt_choice "$item")
+    case "$action" in
+      skip)
+        echo "skipped $f"
+        continue
+        ;;
+      cancel)
+        echo "cancelled by user" >&2
+        exit 1
+        ;;
+      overwrite)
+        # Preserve whatever was already in the password slot (probably empty).
+        existing_pw=$(rbw get "$item" 2>/dev/null || true)
+        ;;
+    esac
+  fi
+
+  # rbw uses first line = password, rest = notes. We want notes only, so prepend
+  # a placeholder password line. On overwrite, keep the existing password.
+  : > "$content_file"
+  printf '%s\n' "$existing_pw" >> "$content_file"
+  cat "$f" >> "$content_file"
+
+  if [[ "$action" == "overwrite" ]]; then
+    RBW_UPLOAD_CONTENT="$content_file" EDITOR="$shim" VISUAL="$shim" rbw edit "$item"
+  else
+    RBW_UPLOAD_CONTENT="$content_file" EDITOR="$shim" VISUAL="$shim" rbw add "$item"
+  fi
+
+  rm -f "$f"
+  printf 'uploaded %s -> %s (local file removed)\n' "$f" "$item"
+done

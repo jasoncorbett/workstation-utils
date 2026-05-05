@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Detect project type in the current directory and run it. Optionally loads
+# environment variables from a Bitwarden item via bw-env.
+#
+# Usage: start [env-name]
+#   With env-name: loads vault item "<project-name>-env-<env-name>".
+
+die() { printf 'start: %s\n' "$*" >&2; exit 1; }
+
+env_name="${1:-default}"
+project_dir=$(pwd -P)
+project_name=$(basename "$project_dir")
+
+self_dir=$(cd "$(dirname "$(command -v "$0")")" && pwd -P)
+bw_env="$self_dir/bw-env"
+[[ -x "$bw_env" ]] || die "bw-env not found at $bw_env"
+
+cmds=()
+
+# .start-commands runs first if present.
+if [[ -e .start-commands ]]; then
+  [[ -x .start-commands ]] || die ".start-commands exists but is not executable"
+  cmds+=("./.start-commands")
+fi
+
+# Project-type detection (first match wins).
+if [[ -f go.mod ]]; then
+  cmds+=("go build -o ${project_name}" "./${project_name}")
+elif [[ -f poetry.lock ]]; then
+  cmds+=("poetry run python main.py")
+elif [[ -f uv.lock ]]; then
+  cmds+=("uv run python main.py")
+elif [[ -f package.json ]]; then
+  [[ -f yarn.lock ]] || die "Node project without yarn.lock is not supported (yarn only)"
+  command -v yarn >/dev/null 2>&1 || die "yarn not installed"
+  command -v node >/dev/null 2>&1 || die "node not installed"
+
+  yarn_ver=$(yarn --version 2>/dev/null) || die "could not read yarn version"
+  yarn_major="${yarn_ver%%.*}"
+  if [[ "$yarn_major" =~ ^[0-9]+$ ]] && (( yarn_major > 1 )); then
+    command -v corepack >/dev/null 2>&1 || die "yarn $yarn_ver requires corepack (not found)"
+    cmds+=("corepack enable")
+  fi
+
+  scripts_json=$(node -e "process.stdout.write(JSON.stringify(Object.keys((require('./package.json').scripts)||{})))") \
+    || die "could not parse package.json"
+
+  has_script() {
+    node -e "const s=require('./package.json').scripts||{};process.exit(s[process.argv[1]]?0:1)" "$1"
+  }
+
+  if has_script build && has_script dev; then
+    cmds+=("yarn build" "yarn dev")
+  elif has_script dev; then
+    cmds+=("yarn dev")
+  elif has_script start; then
+    cmds+=("yarn start")
+  else
+    die "package.json has no build/dev/start script (found: $scripts_json)"
+  fi
+else
+  die "no supported project type detected in $project_dir"
+fi
+
+# Compose command list into a single &&-chained shell snippet.
+chain=""
+for c in "${cmds[@]}"; do
+  if [[ -z "$chain" ]]; then
+    chain="$c"
+  else
+    chain="$chain && $c"
+  fi
+done
+
+exec "$bw_env" "${project_name}-env-${env_name}" bash -c "$chain"
