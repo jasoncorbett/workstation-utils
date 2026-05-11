@@ -28,10 +28,6 @@ fi
 # Project-type detection (first match wins).
 if [[ -f go.mod ]]; then
   cmds+=("go build -o ${project_name}" "./${project_name}")
-elif [[ -f poetry.lock ]]; then
-  cmds+=("poetry run python main.py")
-elif [[ -f uv.lock ]]; then
-  cmds+=("uv run python main.py")
 elif [[ -f package.json ]]; then
   [[ -f yarn.lock ]] || die "Node project without yarn.lock is not supported (yarn only)"
   command -v yarn >/dev/null 2>&1 || die "yarn not installed"
@@ -60,6 +56,10 @@ elif [[ -f package.json ]]; then
   else
     die "package.json has no build/dev/start script (found: $scripts_json)"
   fi
+elif [[ -f poetry.lock ]]; then
+  cmds+=("poetry run python main.py")
+elif [[ -f uv.lock ]]; then
+  cmds+=("uv run python main.py")
 else
   die "no supported project type detected in $project_dir"
 fi
